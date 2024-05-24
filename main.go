@@ -3,6 +3,8 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
+	"golang.org/x/net/html"
 	"io"
 	"log"
 	"net/http"
@@ -207,11 +209,56 @@ func getRedditHeadlines(client *http.Client, auth map[Integration]AuthToken, sub
 		for _, posts := range posts {
 			headline := Headline{
 				Title:  posts.Title,
-				Source: "www.reddit.com", ///r/" + subreddit,
+				Source: "www.reddit.com/r/" + subreddit,
 			}
 
 			headlines = append(headlines, headline)
 		}
+	}
+
+	return headlines
+}
+
+func findTitleSpans(n *html.Node, headlines *[]Headline) {
+	class := "titleline"
+	if n.Type == html.ElementNode && n.Data == "span" {
+		for _, attr := range n.Attr {
+			if attr.Key == "class" && attr.Val == class {
+				for c := n.FirstChild; c != nil; c = c.NextSibling {
+					// the actual title is inside the <a> tag
+					if c.Type == html.ElementNode && c.Data == "a" {
+						headline := Headline{
+							Title:  c.FirstChild.Data,
+							Source: "news.ycombinator.com",
+						}
+
+						*headlines = append(*headlines, headline)
+					}
+				}
+			}
+		}
+	}
+
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		findTitleSpans(c, headlines)
+	}
+}
+
+func getHackernewsHeadlines(client *http.Client, pages int) []Headline {
+	headlines := make([]Headline, 0)
+
+	for p := 1; p <= pages; p++ {
+		log.Println("[INFO] getting hackernews headlines for page: ", p)
+		req, err := http.NewRequest("GET", "https://news.ycombinator.com/?p="+fmt.Sprint(p), nil)
+		errCheck(err, "error creating request: ", 1)
+
+		resp, err := client.Do(req)
+		errCheck(err, "error sending request: ", 1)
+
+		doc, err := html.Parse(resp.Body)
+		errCheck(err, "error parsing response: ", 1)
+
+		findTitleSpans(doc, &headlines)
 	}
 
 	return headlines
@@ -239,10 +286,9 @@ func gptHeadlinePrompt(client *http.Client, headlines []Headline) string {
 
 	prompt += "\n\n"
 
-	log.Println(prompt)
-
 	reqBody := map[string]interface{}{
-		"model": "gpt-4o",
+		"model":       "gpt-4o",
+		"temperature": 1,
 		"messages": []map[string]string{
 			{
 				"role":    "system",
@@ -275,7 +321,8 @@ func main() {
 	auth := getOrRefreshAuth(client)
 
 	headlines := make([]Headline, 0)
-	headlines = append(headlines, getRedditHeadlines(client, auth, []string{"wallstreetbets", "investmentclub", "stockmarkets"})...)
+	headlines = append(headlines, getHackernewsHeadlines(client, 5)...)
+	headlines = append(headlines, getRedditHeadlines(client, auth, []string{"wallstreetbets", "investmentclub", "stockmarkets", "investing", "cryptocurrency"})...)
 
 	log.Println("summary: ", gptHeadlinePrompt(client, headlines))
 }
