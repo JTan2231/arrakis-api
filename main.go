@@ -4,11 +4,14 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"github.com/jtan2231/arrakis-api/db"
+	"github.com/jtan2231/arrakis-api/types/discord"
 	"golang.org/x/net/html"
 	"io"
 	"log"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -40,6 +43,7 @@ type Headline struct {
 }
 
 const REDDIT_BASE_URL = "https://oauth.reddit.com"
+const DISCORD_API_BASE_URL = "https://discord.com/api/v10"
 
 type Integration int
 
@@ -191,7 +195,7 @@ func getRedditHeadlines(client *http.Client, auth map[Integration]AuthToken, sub
 
 	for _, subreddit := range subreddits {
 		log.Println("[INFO] getting headlines for subreddit: ", subreddit)
-		req, err := http.NewRequest("GET", REDDIT_BASE_URL+"/r/"+subreddit+"/hot?limit=100&raw_json=1", nil)
+		req, err := http.NewRequest("GET", REDDIT_BASE_URL+"/r/"+subreddit+"/hot?limit=20&raw_json=1", nil)
 		errCheck(err, "error creating request: ", 1)
 
 		token := auth[REDDIT]
@@ -215,6 +219,8 @@ func getRedditHeadlines(client *http.Client, auth map[Integration]AuthToken, sub
 			headlines = append(headlines, headline)
 		}
 	}
+
+	log.Println("[INFO] reddit headline count: ", len(headlines))
 
 	return headlines
 }
@@ -261,6 +267,35 @@ func getHackernewsHeadlines(client *http.Client, pages int) []Headline {
 		findTitleSpans(doc, &headlines)
 	}
 
+	log.Println("[INFO] hackernews headline count: ", len(headlines))
+
+	return headlines
+}
+
+func get4ChanHeadlines(client *http.Client, board string) []Headline {
+	headlines := make([]Headline, 0)
+
+	req, err := http.NewRequest("GET", "https://boards.4chan.org/"+board+"/catalog", nil)
+	errCheck(err, "error creating request: ", 1)
+
+	resp, err := client.Do(req)
+	errCheck(err, "error sending request: ", 1)
+
+	// regex for finding thread ids in the response body
+	regex := regexp.MustCompile(`"teaser":"(.*?)"`)
+	body, err := io.ReadAll(resp.Body)
+	errCheck(err, "error reading response: ", 1)
+
+	threadNumbers := regex.FindAllString(string(body), -1)
+	for _, number := range threadNumbers {
+		headlines = append(headlines, Headline{
+			Title:  strings.Trim(number, "\"teaser\":\""),
+			Source: "boards.4chan.org/" + board,
+		})
+	}
+
+	log.Println("[INFO] /", board, "/ headline count: ", len(headlines))
+
 	return headlines
 }
 
@@ -286,13 +321,15 @@ func gptHeadlinePrompt(client *http.Client, headlines []Headline) string {
 
 	prompt += "\n\n"
 
+	log.Println("[INFO] Prompt size: ", len(prompt))
+
 	reqBody := map[string]interface{}{
 		"model":       "gpt-4o",
 		"temperature": 1,
 		"messages": []map[string]string{
 			{
 				"role":    "system",
-				"content": "You are a news aggregator bot. Given a list of sources, and a list of posts from each source, provide a nuanced summary of what's being posted. Be concise, be professional. The user already knows what you're being given--there's no need to restate or provide context. Do not segregate, do not organize. Write as if you are speaking with a friend on what you've seen.",
+				"content": "You are a news aggregator bot. Given a list of sources, and a list of posts from each source, provide a nuanced summary of what's being posted. Be thorough! Details matter, no matter how noisy/inappropriate (don't forget 4chan!). Be specific! Focus on _all_ the topics being talked about, not the fact that the chatter exists. The user already knows what you're being given--there's no need to restate or provide context. Do not segregate, do not organize. Write as if you are speaking with a friend on what you've seen.",
 			},
 			{
 				"role":    "user",
@@ -315,14 +352,83 @@ func gptHeadlinePrompt(client *http.Client, headlines []Headline) string {
 	return string(body)
 }
 
-func main() {
+func setAnnouncementChannel(writer http.ResponseWriter, request *http.Request) {
+	if request.Method == "POST" {
+		var interaction discord.Interaction
+		err := json.NewDecoder(request.Body).Decode(&interaction)
+		errCheck(err, "error decoding interaction: ", 1)
+
+		guildID := interaction.GuildID
+		channelID := interaction.ChannelID
+
+		log.Println("[INFO] Setting announcement channel for guild " + guildID + " from channel " + channelID)
+
+		options := interaction.Data.Options
+		if len(options) < 2 {
+			writer.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		// we really only care about the first option given
+		targetChannelName := options[0].Value
+
+		// get a list of channels in the given guildID
+		req, err := http.NewRequest("GET", DISCORD_API_BASE_URL+"/guilds/"+guildID+"/channels", nil)
+		errCheck(err, "error creating get-channels request: ", 1)
+
+		req.Header.Set("Authorization", "Bot "+os.Getenv("DISCORD_BOT_TOKEN"))
+
+		resp, err := http.DefaultClient.Do(req)
+
+		body, err := io.ReadAll(resp.Body)
+		errCheck(err, "error reading response: ", 1)
+
+		var channels []discord.Channel
+		err = json.Unmarshal(body, &channels)
+		errCheck(err, "error unmarshalling channels: ", 1)
+
+		var targetChannelID string
+		for _, channel := range channels {
+			if channel.Name == targetChannelName {
+				log.Println("[INFO] Found channel: ", channel.Name)
+				targetChannelID = channel.ID
+			}
+		}
+
+		if targetChannelID != "" {
+			db.SetAnnouncementChannel(guildID, targetChannelID)
+		}
+
+		writer.WriteHeader(http.StatusOK)
+	} else {
+		writer.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func testHeadlinePrompting() {
 	client := &http.Client{}
 
 	auth := getOrRefreshAuth(client)
 
 	headlines := make([]Headline, 0)
 	headlines = append(headlines, getHackernewsHeadlines(client, 5)...)
-	headlines = append(headlines, getRedditHeadlines(client, auth, []string{"wallstreetbets", "investmentclub", "stockmarkets", "investing", "cryptocurrency"})...)
+	headlines = append(headlines, getRedditHeadlines(client, auth, []string{"wallstreetbets", "investmentclub", "stockmarkets", "investing", "cryptocurrency", "cscareerquestions", "worldnews", "stocks"})...)
+	headlines = append(headlines, get4ChanHeadlines(client, "biz")...)
+	headlines = append(headlines, get4ChanHeadlines(client, "g")...)
 
-	log.Println("summary: ", gptHeadlinePrompt(client, headlines))
+	prompt := gptHeadlinePrompt(client, headlines)
+	for _, line := range strings.Split(prompt, "\n\n") {
+		fmt.Println(line)
+	}
+}
+
+func main() {
+	db.InitDB()
+	db := db.GetDB()
+	defer db.Close()
+
+	http.HandleFunc("/set-announcement-channel", setAnnouncementChannel)
+	log.Println("[INFO] Server started on port 8080")
+	err := http.ListenAndServe(":8080", nil)
+	errCheck(err, "error starting server: ", 1)
 }
