@@ -22,6 +22,10 @@ func InitDB() {
 	log.Println("[INFO] connected to database")
 }
 
+func GetDB() *sql.DB {
+	return db
+}
+
 func CloseDB() {
 	db.Close()
 }
