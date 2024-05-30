@@ -4,8 +4,8 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
-	"github.com/jtan2231/arrakis-api/db"
 	"github.com/jtan2231/arrakis-api/types/discord"
+	"github.com/robfig/cron/v3"
 	"golang.org/x/net/html"
 	"io"
 	"log"
@@ -299,7 +299,7 @@ func get4ChanHeadlines(client *http.Client, board string) []Headline {
 	return headlines
 }
 
-func gptHeadlinePrompt(client *http.Client, headlines []Headline) string {
+func gptHeadlinePrompt(client *http.Client, headlines []Headline) []string {
 	sourceMap := make(map[string][]Headline)
 	for _, headline := range headlines {
 		sourceMap[headline.Source] = append(sourceMap[headline.Source], headline)
@@ -329,7 +329,7 @@ func gptHeadlinePrompt(client *http.Client, headlines []Headline) string {
 		"messages": []map[string]string{
 			{
 				"role":    "system",
-				"content": "You are a news aggregator bot. Given a list of sources, and a list of posts from each source, provide a nuanced summary of what's being posted. Be thorough! Details matter, no matter how noisy/inappropriate (don't forget 4chan!). Be specific! Focus on _all_ the topics being talked about, not the fact that the chatter exists. The user already knows what you're being given--there's no need to restate or provide context. Do not segregate, do not organize. Write as if you are speaking with a friend on what you've seen.",
+				"content": "You are a news aggregator bot. Given a list of sources, and a list of posts from each source, provide a nuanced summary of what's being posted. Be thorough, but be careful! The messages can't be too long (2000 character limit!). Details matter, no matter how noisy/inappropriate (don't forget 4chan!). Be specific! Focus on _all_ the topics being talked about, not the fact that the chatter exists. The user already knows what you're being given--there's no need to restate or provide context. Do not segregate, do not organize. Write as if you are speaking with a friend on what you've seen.",
 			},
 			{
 				"role":    "user",
@@ -349,63 +349,31 @@ func gptHeadlinePrompt(client *http.Client, headlines []Headline) string {
 	body, err = io.ReadAll(resp.Body)
 	errCheck(err, "error reading response: ", 1)
 
-	return string(body)
-}
+	var response map[string]interface{}
+	err = json.Unmarshal(body, &response)
+	errCheck(err, "error unmarshalling response: ", 1)
 
-func setAnnouncementChannel(writer http.ResponseWriter, request *http.Request) {
-	if request.Method == "POST" {
-		var interaction discord.Interaction
-		err := json.NewDecoder(request.Body).Decode(&interaction)
-		errCheck(err, "error decoding interaction: ", 1)
+	choices := response["choices"].([]interface{})
+	message := choices[0].(map[string]interface{})["message"].(map[string]interface{})["content"].(string)
 
-		guildID := interaction.GuildID
-		channelID := interaction.ChannelID
+	log.Println("[INFO] GPT response: ", message)
 
-		log.Println("[INFO] Setting announcement channel for guild " + guildID + " from channel " + channelID)
+	splits := make([]string, 0)
 
-		options := interaction.Data.Options
-		if len(options) < 2 {
-			writer.WriteHeader(http.StatusBadRequest)
-			return
-		}
-
-		// we really only care about the first option given
-		targetChannelName := options[0].Value
-
-		// get a list of channels in the given guildID
-		req, err := http.NewRequest("GET", DISCORD_API_BASE_URL+"/guilds/"+guildID+"/channels", nil)
-		errCheck(err, "error creating get-channels request: ", 1)
-
-		req.Header.Set("Authorization", "Bot "+os.Getenv("DISCORD_BOT_TOKEN"))
-
-		resp, err := http.DefaultClient.Do(req)
-
-		body, err := io.ReadAll(resp.Body)
-		errCheck(err, "error reading response: ", 1)
-
-		var channels []discord.Channel
-		err = json.Unmarshal(body, &channels)
-		errCheck(err, "error unmarshalling channels: ", 1)
-
-		var targetChannelID string
-		for _, channel := range channels {
-			if channel.Name == targetChannelName {
-				log.Println("[INFO] Found channel: ", channel.Name)
-				targetChannelID = channel.ID
-			}
-		}
-
-		if targetChannelID != "" {
-			db.SetAnnouncementChannel(guildID, targetChannelID)
-		}
-
-		writer.WriteHeader(http.StatusOK)
-	} else {
-		writer.WriteHeader(http.StatusMethodNotAllowed)
+	base := 2000
+	increment := base
+	for len(message) > 0 {
+		increment = min(base, len(message))
+		splits = append(splits, message[0:increment])
+		message = message[increment:]
 	}
+
+	log.Println("[INFO] split count: ", len(splits))
+
+	return splits
 }
 
-func testHeadlinePrompting() {
+func getHeadlinePrompt() []string {
 	client := &http.Client{}
 
 	auth := getOrRefreshAuth(client)
@@ -416,18 +384,112 @@ func testHeadlinePrompting() {
 	headlines = append(headlines, get4ChanHeadlines(client, "biz")...)
 	headlines = append(headlines, get4ChanHeadlines(client, "g")...)
 
-	prompt := gptHeadlinePrompt(client, headlines)
-	for _, line := range strings.Split(prompt, "\n\n") {
-		fmt.Println(line)
+	return gptHeadlinePrompt(client, headlines)
+}
+
+func sendDiscordRequest(client *http.Client, endpoint string, method string) ([]byte, error) {
+	req, err := http.NewRequest(method, DISCORD_API_BASE_URL+endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("Authorization", "Bot "+os.Getenv("ARRAKIS_TERMINAL_TOKEN"))
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+
+	body, err := io.ReadAll(resp.Body)
+
+	return body, err
+}
+
+func sendHeadlinePrompt() {
+	client := &http.Client{}
+
+	serverIDs := make([]string, 0)
+
+	body, err := sendDiscordRequest(client, "/users/@me/guilds", "GET")
+	errCheck(err, "error getting bot guilds: ", 1)
+
+	var servers []discord.Guild
+	log.Println("[INFO] body: ", string(body))
+	err = json.Unmarshal(body, &servers)
+	errCheck(err, "error unmarshalling discord servers: ", 1)
+
+	for _, server := range servers {
+		serverIDs = append(serverIDs, server.ID)
+	}
+
+	log.Println("[INFO] server IDs: ", serverIDs)
+
+	validChannelNames := [3]string{"arrakis-terminal", "money-talk", "arrakeen"}
+	isValidChannel := func(name string) bool {
+		for _, validName := range validChannelNames {
+			if name == validName {
+				return true
+			}
+		}
+
+		return false
+	}
+
+	var channels []discord.Channel
+	for _, serverID := range serverIDs {
+		body, err := sendDiscordRequest(client, "/guilds/"+serverID+"/channels", "GET")
+		errCheck(err, "error getting discord channels for guild "+serverID+": ", 1)
+
+		var serverChannels []discord.Channel
+		err = json.Unmarshal(body, &serverChannels)
+		errCheck(err, "error unmarshalling discord channels: ", 1)
+
+		for _, channel := range serverChannels {
+			if channel.Type == 0 && isValidChannel(channel.Name) {
+				channels = append(channels, channel)
+			}
+		}
+	}
+
+	log.Println("[INFO] sending updates to channels: ", channels)
+
+	prompt := getHeadlinePrompt()
+	for _, channel := range channels {
+		if channel.Type == 0 {
+			for i, split := range prompt {
+				reqBody := map[string]interface{}{
+					"content": split,
+				}
+
+				body, err := json.Marshal(reqBody)
+				errCheck(err, "error marshalling request body: ", 1)
+
+				req, err := http.NewRequest("POST", DISCORD_API_BASE_URL+"/channels/"+channel.ID+"/messages", nil)
+				errCheck(err, "error creating request: ", 1)
+
+				req.Header.Set("Authorization", "Bot "+os.Getenv("ARRAKIS_TERMINAL_TOKEN"))
+				req.Header.Set("Content-Type", "application/json")
+				req.Body = io.NopCloser(strings.NewReader(string(body)))
+
+				log.Println("[INFO] sending split ", i, " of ", len(prompt))
+				response, err := client.Do(req)
+				log.Println("[INFO] response: ", response)
+				errCheck(err, "error sending request: ", 1)
+
+				time.Sleep(500 * time.Millisecond)
+			}
+		}
 	}
 }
 
 func main() {
-	db.InitDB()
-	db := db.GetDB()
-	defer db.Close()
+	c := cron.New()
+	c.AddFunc("0 0 12 * * *", sendHeadlinePrompt)
 
-	http.HandleFunc("/set-announcement-channel", setAnnouncementChannel)
+	c.Start()
+
+	defer c.Stop()
+
 	log.Println("[INFO] Server started on port 8080")
 	err := http.ListenAndServe(":8080", nil)
 	errCheck(err, "error starting server: ", 1)

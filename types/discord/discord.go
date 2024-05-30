@@ -26,3 +26,8 @@ type Channel struct {
 	GuildID string `json:"guild_id"`
 	Name    string `json:"name"`
 }
+
+type Guild struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
