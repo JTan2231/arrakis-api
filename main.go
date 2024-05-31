@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/jtan2231/arrakis-api/types/discord"
-	"github.com/robfig/cron/v3"
 	"golang.org/x/net/html"
 	"io"
 	"log"
