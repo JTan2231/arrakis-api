@@ -406,6 +406,8 @@ func sendDiscordRequest(client *http.Client, endpoint string, method string) ([]
 }
 
 func sendHeadlinePrompt() {
+	log.Println("[INFO] sending headline prompt")
+
 	client := &http.Client{}
 
 	serverIDs := make([]string, 0)
@@ -483,8 +485,11 @@ func sendHeadlinePrompt() {
 }
 
 func main() {
+	// set log output to stdout
+	log.SetOutput(os.Stdout)
+
 	c := cron.New()
-	c.AddFunc("0 0 12 * * *", sendHeadlinePrompt)
+	c.AddFunc("0 0 14 * * *", sendHeadlinePrompt)
 
 	c.Start()
 
