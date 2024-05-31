@@ -488,14 +488,5 @@ func main() {
 	// set log output to stdout
 	log.SetOutput(os.Stdout)
 
-	c := cron.New()
-	c.AddFunc("0 0 14 * * *", sendHeadlinePrompt)
-
-	c.Start()
-
-	defer c.Stop()
-
-	log.Println("[INFO] Server started on port 8080")
-	err := http.ListenAndServe(":8080", nil)
-	errCheck(err, "error starting server: ", 1)
+	sendHeadlinePrompt()
 }
