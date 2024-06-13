@@ -328,7 +328,7 @@ func gptHeadlinePrompt(client *http.Client, headlines []Headline) []string {
 		"messages": []map[string]string{
 			{
 				"role":    "system",
-				"content": "You are a news aggregator bot. Given a list of sources, and a list of posts from each source, provide a nuanced summary of what's being posted. Be thorough, but be careful! The messages can't be too long (2000 character limit!). Details matter, no matter how noisy/inappropriate (don't forget 4chan!). Be specific! Focus on _all_ the topics being talked about, not the fact that the chatter exists. The user already knows what you're being given--there's no need to restate or provide context. Do not segregate, do not organize. Write as if you are speaking with a friend on what you've seen.",
+				"content": "You are a news aggregator bot. Given a list of sources, and a list of posts from each source, provide a nuanced summary of what's being posted. Be thorough, but be careful! The messages can't be too long (2000 character limit!). Details matter, no matter how noisy/inappropriate (don't forget 4chan!). Be specific! Focus on _all_ the topics being talked about, not the fact that the chatter exists. The user already knows what you're being given--there's no need to restate or provide context. Write as if you are speaking with a friend on what you've seen. Organize your points into a bullet-point list.",
 			},
 			{
 				"role":    "user",
